@@ -1,9 +1,7 @@
 package kvpaxos
 
 import "net/rpc"
-import "time"
-import "crypto/rand"
-import "math/big"
+import "fmt"
 
 type Clerk struct {
   servers []string
@@ -46,6 +44,8 @@ func call(srv string, rpcname string,
   if err == nil {
     return true
   }
+
+  fmt.Println(err)
   return false
 }
 
@@ -65,6 +65,7 @@ func (ck *Clerk) Get(key string) string {
 //
 func (ck *Clerk) PutExt(key string, value string, dohash bool) string {
   // You will have to modify this function.
+  return ""
 }
 
 func (ck *Clerk) Put(key string, value string) {

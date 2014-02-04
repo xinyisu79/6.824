@@ -74,6 +74,8 @@ func call(srv string, name string, args interface{}, reply interface{}) bool {
   if err == nil {
     return true
   }
+
+  fmt.Println(err)
   return false
 }
 

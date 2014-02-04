@@ -1,6 +1,7 @@
 package lockservice
 
 import "net/rpc"
+import "fmt"
 
 //
 // the lockservice Clerk lives in the client
@@ -48,6 +49,8 @@ func call(srv string, rpcname string,
   if err == nil {
     return true
   }
+
+  fmt.Println(err)
   return false
 }
 
