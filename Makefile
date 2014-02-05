@@ -4,10 +4,10 @@
 #     $ make [lab1|lab2a|lab2b|lab3a|lab3b|lab4a|lab4b]
 
 KEY=$(shell cat api.key)
-LABS="lab1 lab2a lab2b lab3a lab3b lab4a lab4b"
+LABS=" lab1 lab2a lab2b lab3a lab3b lab4a lab4b "
 
 %:
-	@if echo $(LABS) | grep -q "$@ " ; then \
+	@if echo $(LABS) | grep -q " $@ " ; then \
 	    tar cvzf $@-handin.tar.gz Makefile .git src; \
 	    if test -z $(KEY) ; then \
 	        echo "Missing $(PWD)/api.key. Please create the file with your key in it or submit the $@-handin.tar.gz via the web interface."; \
