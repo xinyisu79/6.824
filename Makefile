@@ -12,6 +12,9 @@ LABS=" lab1 lab2a lab2b lab3a lab3b lab4a lab4b "
 	    if test -z $(KEY) ; then \
 	        echo "Missing $(PWD)/api.key. Please create the file with your key in it or submit the $@-handin.tar.gz via the web interface."; \
 	    else \
+                echo "Are you sure you want to submit $@? Enter 'yes' to continue:"; \
+                read line; \
+                if test $$line != "yes" ; then echo "Giving up submission"; exit; fi; \
 	        curl -F file=@$@-handin.tar.gz -F key=$(KEY) http://ydmao.scripts.mit.edu/6.824/handin.py/upload; \
 	    fi; \
         else \
