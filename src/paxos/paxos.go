@@ -122,9 +122,6 @@ func (px *Paxos) Max() int {
 // The point is to free up memory in long-running
 // Paxos-based servers.
 //
-// It is illegal to call Done(i) on a peer and
-// then call Start(j) on that peer for any j <= i.
-//
 // Paxos peers need to exchange their highest Done()
 // arguments in order to implement Min(). These
 // exchanges can be piggybacked on ordinary Paxos

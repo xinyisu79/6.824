@@ -381,7 +381,7 @@ func TestForgetMem(t *testing.T) {
   for i := 1; i <= 10; i++ {
     big := make([]byte, 1000000)
     for j := 0; j < len(big); j++ {
-      big[j] = byte(rand.Int() % 100)
+      big[j] = byte('a' + rand.Int() % 26)
     }
     pxa[0].Start(i, string(big))
     waitn(t, pxa, i, npaxos)
@@ -476,11 +476,11 @@ func TestRPCCount(t *testing.T) {
   }
   total2 -= total1
 
-  // per agreement:
-  // 9 prepares
-  // 9 accepts
-  // 9 decides
-  expected2 := ninst2 * npaxos * (npaxos + npaxos + npaxos)
+  // worst case per agreement:
+  // Proposer 1: 3 prep, 3 acc, 3 decides.
+  // Proposer 2: 3 prep, 3 acc, 3 prep, 3 acc, 3 decides.
+  // Proposer 3: 3 prep, 3 acc, 3 prep, 3 acc, 3 prep, 3 acc, 3 decides.
+  expected2 := ninst2 * npaxos * 15
   if total2 > expected2 {
     t.Fatalf("too many RPCs for concurrent Start()s; %v instances, got %v, expected %v",
       ninst2, total2, expected2)
