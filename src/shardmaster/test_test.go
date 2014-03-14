@@ -235,6 +235,16 @@ func TestBasic(t *testing.T) {
 
   fmt.Printf("  ... Passed\n")
 
+  fmt.Printf("Test: Min advances after joins ...\n")
+
+  for i, sm := range(sma) {
+      if sm.px.Min() <= 0 {
+          t.Fatalf("Min() for %s did not advance", kvh[i])
+      }
+  }
+
+  fmt.Printf("  ... Passed\n")
+
   fmt.Printf("Test: Minimal transfers after joins ...\n")
 
   c1 := ck.Query(-1)
