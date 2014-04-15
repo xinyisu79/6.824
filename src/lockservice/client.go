@@ -8,7 +8,7 @@ import "fmt"
 // and maintains a little state.
 //
 type Clerk struct {
-  servers [2]string // primary port, backup port
+  servers [2]string // primary port, bap port
   // Your definitions here.
 }
 
