@@ -31,71 +31,79 @@ func (mr *MapReduce) RunMaster() *list.List {
 	// Your code here
 
 	//slice is different array, array's length is fixed, to be investigate
-	var mapChan, reduceChan = make([]chan bool, mr.nMap), make([]chan bool, mr.nReduce)
-	for i := 0; i < mr.nMap; i++{
-		mapChan[i] = make(chan bool)
-	}
-	for i := 0; i < mr.nReduce; i++{
-		reduceChan[i] = make(chan bool)
-	}
+	//var mapChan, reduceChan = make([]chan bool, mr.nMap), make([]chan bool, mr.nReduce)
+	var mapChan, reduceChan = make(chan int, mr.nMap), make(chan int, mr.nReduce)
 
 	//define here, instead of outside RunMaster() could read mr.XX directly
-	var send_map = func(worker string, ind int){
+	var send_map = func(worker string, ind int) bool{
 		var jobArgs DoJobArgs
 		var reply DoJobReply
 		jobArgs.NumOtherPhase = mr.nReduce
 		jobArgs.Operation = Map
 		jobArgs.File = mr.file
 		jobArgs.JobNumber = ind
-		call(worker, "Worker.DoJob", jobArgs, &reply)
-		mapChan[ind] <- true
-		mr.idleChannel <- worker
+		return call(worker, "Worker.DoJob", jobArgs, &reply)
 	}
 
-	var send_reduce = func(worker string, ind int){
+	var send_reduce = func(worker string, ind int) bool{
 		var jobArgs DoJobArgs
 		var reply DoJobReply
 		jobArgs.NumOtherPhase = mr.nMap
 		jobArgs.Operation = Reduce
 		jobArgs.File = mr.file
 		jobArgs.JobNumber = ind
-		call(worker, "Worker.DoJob", jobArgs, &reply)
-		reduceChan[ind] <- true
-		mr.idleChannel <- worker
+		return call(worker, "Worker.DoJob", jobArgs, &reply)
 	}
 
 	for i := 0; i < mr.nMap; i++ {
 		go func(ind int){
-			var worker string
-			select {
-			case worker = <-mr.idleChannel:
-				send_map(worker, ind)
-			case worker = <-mr.registerChannel:
-				send_map(worker, ind)
+			for{
+				var worker string
+				var ok bool = false
+				select {
+				case worker = <-mr.idleChannel:
+					ok = send_map(worker, ind)
+				case worker = <-mr.registerChannel:
+					ok = send_map(worker, ind)
+				}
+				if (ok){
+					//the order of this couldn't change, otherwise the last several task get stuck
+					mapChan <- ind
+					mr.idleChannel <- worker
+					return
+				}
 			}
 		}(i)
 	}
 
 	for i := 0; i < mr.nMap; i++{
-		<- mapChan[i]
+		<- mapChan
 	}
 
 	fmt.Println("Map is Done")
 
 	for i := 0; i < mr.nReduce; i++{
 		go func(ind int){
-			var worker string
-			select {
-			case worker = <- mr.idleChannel:
-				send_reduce(worker, ind)
-			case worker = <- mr.registerChannel:
-				send_reduce(worker, ind)
+			for {
+				var worker string
+				var ok = false
+				select {
+				case worker = <- mr.idleChannel:
+					ok = send_reduce(worker, ind)
+				case worker = <- mr.registerChannel:
+					ok = send_reduce(worker, ind)
+				}
+				if ok{
+					reduceChan <- ind
+					mr.idleChannel <- worker
+					return
+				}
 			}
 		}(i)
 	}
 
 	for i := 0; i < mr.nReduce; i++{
-		<- reduceChan[i]
+		<- reduceChan
 	}
 
 	fmt.Println("Reduce is Done")

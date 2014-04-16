@@ -232,7 +232,7 @@ func DoMap(JobNumber int, fileName string,
 		}
 		file.Close()
 	}
-//	fmt.Printf("DoMap[Done]: read split %s %d\n", name, size)
+	fmt.Printf("DoMap[Done]: read split %s %d\n", name, size)
 }
 
 func MergeName(fileName string,  ReduceJob int) string {
