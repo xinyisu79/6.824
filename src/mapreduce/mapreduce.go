@@ -64,6 +64,7 @@ type MapReduce struct {
 	Workers map[string]*WorkerInfo
 
 	// add any additional state here
+	idleChannel chan string
 }
 
 func InitMapReduce(nmap int, nreduce int,
@@ -78,6 +79,8 @@ func InitMapReduce(nmap int, nreduce int,
 	mr.DoneChannel = make(chan bool)
 
 	// initialize any additional state here
+	mr.idleChannel = make(chan string)
+
 	return mr
 }
 
@@ -229,6 +232,7 @@ func DoMap(JobNumber int, fileName string,
 		}
 		file.Close()
 	}
+//	fmt.Printf("DoMap[Done]: read split %s %d\n", name, size)
 }
 
 func MergeName(fileName string,  ReduceJob int) string {
