@@ -75,6 +75,7 @@ func Test1(t *testing.T) {
       }
       time.Sleep(PingInterval)
     }
+
     check(t, ck1, ck1.me, ck2.me, vx.Viewnum + 1)
   }
   fmt.Printf("  ... Passed\n")
@@ -113,6 +114,8 @@ func Test1(t *testing.T) {
     check(t, ck2, ck2.me, ck1.me, vx.Viewnum + 1)
   }
   fmt.Printf("  ... Passed\n")
+
+
 
   // start ck3, kill the primary (ck2), the previous backup (ck1)
   // should become the server, and ck3 the backup
@@ -191,6 +194,7 @@ func Test1(t *testing.T) {
     }
     check(t, ck1, ck3.me, ck1.me, vx.Viewnum+1)
     vy, _ := ck1.Get()
+
     // ck3 is the primary, but it never acked.
     // let ck3 die. check that ck1 is not promoted.
     for i := 0; i < DeadPings * 3; i++ {
