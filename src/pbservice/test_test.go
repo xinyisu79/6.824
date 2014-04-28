@@ -98,12 +98,15 @@ func TestBasicFail(t *testing.T) {
   s1.kill()
   for i := 0; i < viewservice.DeadPings * 2; i++ {
     v, _ := vck.Get()
+//		fmt.Println("new view: ", v, "s2.me", s2.me)
     if v.Primary == s2.me {
+//			fmt.Println("got it! new view: ", v, "s2.me", s2.me)
       break
     }
     time.Sleep(viewservice.PingInterval)
   }
   v, _ = vck.Get()
+//	fmt.Println("another check new view: ", v, "s2.me", s2.me)
   if v.Primary != s2.me {
     t.Fatal("backup never switched to primary")
   }

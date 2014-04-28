@@ -1,3 +1,20 @@
+/*
+
+Note:
+1) Lock on View?
+When view service what to return current view to different server/client,
+it is unavoidable to using lock to read/write the current view variable?
+Otherwise have concurrency issues, each RPC is a seperate process.
+But this limit the concurrency degree.
+
+
+
+*/
+
+
+
+
+
 
 package viewservice
 
@@ -53,7 +70,7 @@ func (vs *ViewServer) IsBackup(name string) bool {
 
 func (vs *ViewServer) PromoteBackup() {
 	if !vs.HasBackup() {
-		vs.view.Primary = ""
+//		vs.view.Primary = ""
 		return
 	}
 	vs.view.Primary = vs.view.Backup
@@ -73,6 +90,7 @@ func (vs *ViewServer) Ping(args *PingArgs, reply *PingReply) error {
 	num := args.Viewnum
 	name := args.Me
 	vs.mu.Lock()
+
 
 	switch {
 
@@ -106,6 +124,7 @@ func (vs *ViewServer) Ping(args *PingArgs, reply *PingReply) error {
 		}
 	}
 	reply.View = vs.view
+//	fmt.Println("[viewserver.Ping]: view ", reply.View)
 	vs.mu.Unlock()
 
 	return nil
