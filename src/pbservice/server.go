@@ -1,17 +1,47 @@
 
 /*
+==============================
 Note:
 
+1)
  A danger: suppose in some view S1 is the primary; the viewservice changes views so that S2 is the primary;
  but S1 hasn't yet heard about the new view and thinks it is still primary. Then some clients might talk to S1,
  and others talk to S2, and not see each others' Put()s.
 
- QA:
+ 2) Filter out duplicated request
+ for real world implementation, server maybe using a sliding window to record processed request
+
+ 3) Network partition
+ for primary server, always assign returned view to its current view, even when return empty view. for reason,
+ see tick(); tick is tricky also due to a deadlock bug below
+
+==============================
+
+ Design:
+
+ 1) Filter duplicated request
+ due to unsafety of network, request maybe unreached to the server, or reply doesn't reach client.
+ add unique id for each request, server contain the outstanding(unresponded request) map[client] request
+ assume each client has only one unresponded request
+
+ PutArgs contains Me field, identifying client, which is passed by client during PutExt() arg inti();
+ client.me is generated using nrand() in MakeClerk()/client.go
+
+
+==============================
+  QA:
  1) error return
  why return error has to be &Pberror{"msg"}, not Pberror{"msg"}
 
  2) is it right to ping view server when new client doesn't know what current view is?
  would view server take client as new avaliable server?
+
+ 3) filter out duplciated request
+ then the backup server may also face same problem: its operation response hasn't reached primary?
+
+ 4) concurrent issue
+ seems the concurrency does not fail the concurrent test... but should it be? finer grandularity lock?
+ again, both partA B has problem of mutex protect data. better solution?
 
 */
 
@@ -27,7 +57,10 @@ import "os"
 import "syscall"
 import "math/rand"
 import "sync"
-import "errors"
+import (
+	"errors"
+	"strconv"
+)
 
 //import "strconv"
 
@@ -52,7 +85,14 @@ type PBServer struct {
 
 	// Your declarations here.
 	view viewservice.View
+
+	// seen.client-name => uuid of outstanding rpc
+	// oldreply.client-name => reply value of last rpc for outstanding client
+	// key => value
 	content map[string] string
+
+
+	mu sync.Mutex // used to protect concurrent map access
 }
 
 
@@ -74,66 +114,85 @@ func (pb *PBServer) hasBackup() bool{
 	return pb.view.Backup != ""
 }
 
-func (pb *PBServer) Forward(args *PutArgs, reply *PutReply) error {
+func (pb *PBServer) Forward(args *ForwardArgs) error {
 	if !pb.hasBackup(){
 		return nil
 	}
-	args.Forward = true
-	ok := call(pb.view.Backup, "PBServer.Put", args, &reply)
+	var reply ForwardReply
+	ok := call(pb.view.Backup, "PBServer.ProcessForward", args, &reply)
 	if !ok {
 		return errors.New("[Foward] failed to forward put")
 	}
 	return nil
 }
 
-func (pb *PBServer) ForwardAll() bool {
-	for key,value := range pb.content {
-		args := &PutArgs{Key:key, Value:value, DoHash:false, Forward:true}
-		reply := &PutReply{}
-		pb.Forward(args, reply)
+func (pb *PBServer) ProcessForward(args *ForwardArgs, reply *ForwardReply) error{
+	pb.mu.Lock()
+	if !pb.isBackup(){
+		pb.mu.Unlock()
+		return errors.New("I'm not backup")
 	}
-	return true
+	for key,value := range args.Content{
+		pb.content[key] = value
+	}
+	pb.mu.Unlock()
+	return nil
 }
 
-//TODO: handle duplicated request, adding fields in PutArgs field
 
 func (pb *PBServer) Put(args *PutArgs, reply *PutReply) error {
 	// Your code here.
 
-	var forwardReply PutReply
-	key, value := args.Key, args.Value
+	//not primary case
+	pb.mu.Lock()
+	if !pb.isPrimary(){
+		reply.Err = ErrWrongServer
+		pb.mu.Unlock()
+		return errors.New("i'm nothing")
+	}
 
-	if pb.isPrimary(){
-		if args.Forward{
-			reply.Err = ErrWrongServer
-			return errors.New("[put] primary receive Forward put")
-		}
-		err := pb.Forward(args, &forwardReply)
-		if err != nil {
-			return err
-		}
-		pb.content[key] = value
+	key, value, client, uid := args.Key, args.Value, args.Me, args.UUID
+
+	//at-most-once case
+	if pb.content["seen." + client] == uid{
+		reply.PreviousValue = pb.content["oldreply." + client]
+		pb.mu.Unlock()
 		return nil
 	}
-	if pb.isBackup(){
-		if !args.Forward{
-			reply.Err = ErrWrongServer
-			return errors.New("[put] backup receive non-Forward put")
-		}
-		pb.content[key] = value
-		return nil
+
+	if args.DoHash{
+		reply.PreviousValue = pb.content[key]
+		value = strconv.Itoa(int(hash(reply.PreviousValue + value)))
 	}
-	reply.Err = ErrWrongServer
-	return errors.New("i'm nothing")
+
+	// forward added entries before commit
+	forwardArgs := &ForwardArgs{map[string]string{
+		key : value,
+			"seen."+client : uid,
+			"oldreply."+client : reply.PreviousValue}}
+	err := pb.Forward(forwardArgs)
+	if err != nil{
+		pb.mu.Unlock()
+		return errors.New("forward fail")
+	}
+	for key, value := range forwardArgs.Content{
+		pb.content[key] = value
+	}
+	pb.mu.Unlock()
+	return nil
 }
+
 
 func (pb *PBServer) Get(args *GetArgs, reply *GetReply) error {
 	// Your code here.
+	pb.mu.Lock()
 	if !pb.isPrimary() {
 		reply.Err = ErrWrongServer
+		pb.mu.Unlock()
 		return errors.New("[get] i'm not primary, received Get request")
 	}
 	reply.Value = pb.content[args.Key]
+	pb.mu.Unlock()
 	return nil
 }
 
@@ -141,17 +200,32 @@ func (pb *PBServer) Get(args *GetArgs, reply *GetReply) error {
 // ping the viewserver periodically.
 func (pb *PBServer) tick() {
 	// Your code here.
+	pb.mu.Lock()
+//	fmt.Println("[tick]: ", pb.me, " ", pb.view)
 	view, err := pb.vs.Ping(pb.view.Viewnum)
+
+	// Note: this is very tricky!
+	// if the current primary server is parititioned in the network could not contact server
+	// do nothing, still assign empty view_service to pb.view(see below)
+	// becuase this would prevent this old primary server serve client's request (view ="", isPrimary() false)
+	// it's ok to keep serve request with the [0, primaryDeadInterval) range after disconnected with view server
+	// becuase for get: no harm, (backup not promoted yet); for put(), would succeed when is connected to backup
+
+	// so: do nothing below
 	if err != nil {
-		fmt.Println("[PBServer.tick()]: ping view server fail")
-		os.Exit(-1)
+		//		fmt.Println("[PBServer.tick()]: ", pb.me, " ", view)
+		//		os.Exit(-1)
 	}
-	needForward := view.Backup != "" && view.Backup != pb.view.Backup
+
+	//remove pb.isPrimary would cause deadlock... :(
+	needForward := view.Backup != "" && view.Backup != pb.view.Backup && pb.isPrimary()
 	//send the whole database to backup
+
 	pb.view = view
 	if needForward {
-		pb.ForwardAll()
+		pb.Forward(&ForwardArgs{Content:pb.content})
 	}
+	pb.mu.Unlock()
 }
 
 

@@ -2,8 +2,11 @@ package pbservice
 
 import "viewservice"
 import "net/rpc"
-import "fmt"
-import "time"
+//import "fmt"
+import (
+	"time"
+	"strconv"
+)
 
 // You'll probably need to uncomment these:
 // import "time"
@@ -17,6 +20,7 @@ type Clerk struct {
 	// Your declarations here
 
 	view viewservice.View
+	me string
 }
 
 
@@ -25,6 +29,10 @@ func MakeClerk(vshost string, me string) *Clerk {
 	ck.vs = viewservice.MakeClerk(me, vshost)
 	// Your ck.* initializations here
 	ck.view = viewservice.View{}
+
+	// note: argument me could not garantuee unique, this ck.me field would be put along
+	// with PutArgs to show client's identification
+	ck.me = strconv.FormatInt(nrand(), 10)
 	return ck
 }
 
@@ -58,7 +66,7 @@ func call(srv string, rpcname string,
 		return true
 	}
 
-	fmt.Println(err)
+//	fmt.Println(err)
 	return false
 }
 
@@ -85,9 +93,10 @@ func (ck *Clerk) Get(key string) string {
 	if ck.view.Viewnum == 0{
 		ck.UpdateView()
 	}
+	args := &GetArgs{key, nrand()}
+	var reply GetReply
+
 	for {
-		args := &GetArgs{key}
-		var reply GetReply
 		ok := call(ck.view.Primary, "PBServer.Get", args, &reply)
 		if ok {
 			return reply.Value
@@ -109,12 +118,16 @@ func (ck *Clerk) PutExt(key string, value string, dohash bool) string {
 		ck.UpdateView()
 	}
 //	fmt.Println("[Clerk.Put]: key/value", key, "/", value)
+//	num := nrand()
+//	fmt.Println("uid: ", num, strconv.FormatInt(nrand(), 10))
+	args := &PutArgs{key, value, dohash, false, strconv.FormatInt(nrand(), 10), ck.me}
+//	fmt.Println("args ", args)
+	var reply PutReply
 
 	for {
-		args := &PutArgs{key, value, dohash, false}
-		var reply PutReply
 		ok := call(ck.view.Primary, "PBServer.Put", args, &reply)
 		if ok {
+//			fmt.Println("client.PutExt returns")
 			return reply.PreviousValue
 		}
 		//just always update view, because call may return false, reply empty when server got killed

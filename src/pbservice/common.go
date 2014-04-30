@@ -21,6 +21,8 @@ type PutArgs struct {
   // otherwise RPC will break.
 
 	Forward bool // identify whether it's primary => backup forward request
+	UUID string  //  used for outstanding RPC request
+	Me string // clerk's identification
 }
 
 type PutReply struct {
@@ -31,12 +33,22 @@ type PutReply struct {
 type GetArgs struct {
   Key string
   // You'll have to add definitions here.
+	UUID int64
 }
 
 type GetReply struct {
   Err Err
   Value string
 }
+
+type ForwardArgs struct {
+	Content map[string]string
+}
+
+type ForwardReply struct {
+	Err Err
+}
+
 
 // Your RPC definitions here.
 
