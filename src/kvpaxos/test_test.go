@@ -10,6 +10,7 @@ import "math/rand"
 
 func check(t *testing.T, ck *Clerk, key string, value string) {
   v := ck.Get(key)
+//	fmt.Println("finish getting check")
   if v != value {
     t.Fatalf("Get(%v) -> %v, expected %v", key, v, value)
   }
@@ -74,6 +75,7 @@ func TestBasic(t *testing.T) {
   cka[1].Put("a", "aaa")
 
   check(t, cka[2], "a", "aaa")
+
   check(t, cka[1], "a", "aaa")
   check(t, ck, "a", "aaa")
 

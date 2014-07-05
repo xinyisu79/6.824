@@ -2,10 +2,13 @@ package kvpaxos
 
 import "net/rpc"
 import "fmt"
+import "strconv"
 
 type Clerk struct {
   servers []string
   // You will have to modify this struct.
+	//client's idenfication
+	me string
 }
 
 
@@ -13,7 +16,8 @@ func MakeClerk(servers []string) *Clerk {
   ck := new(Clerk)
   ck.servers = servers
   // You'll have to add code here.
-  return ck
+	ck.me = strconv.FormatInt(nrand(), 10)
+	return ck
 }
 
 //
@@ -56,7 +60,16 @@ func call(srv string, rpcname string,
 //
 func (ck *Clerk) Get(key string) string {
   // You will have to modify this function.
-  return ""
+	arg := GetArgs{key, nrand(), ck.me}
+	var reply GetReply
+	succeed := false
+	servInex := 0
+	//TODO: need sleep for a short time?
+	for !succeed{
+		succeed = call(ck.servers[servInex], "KVPaxos.Get", arg, &reply)
+		servInex = (servInex + 1) % len(ck.servers)
+	}
+	return reply.Value
 }
 
 //
@@ -65,7 +78,16 @@ func (ck *Clerk) Get(key string) string {
 //
 func (ck *Clerk) PutExt(key string, value string, dohash bool) string {
   // You will have to modify this function.
-  return ""
+	arg := PutArgs{key, value, dohash, nrand(), ck.me}
+	var reply PutReply
+	succeed := false
+	servInex := 0
+	for !succeed{
+		succeed = call(ck.servers[servInex], "KVPaxos.Put", arg, &reply)
+		servInex = (servInex + 1) % len(ck.servers)
+		//TODO: need sleep for a short time?
+	}
+	return reply.PreviousValue
 }
 
 func (ck *Clerk) Put(key string, value string) {
@@ -75,3 +97,4 @@ func (ck *Clerk) PutHash(key string, value string) string {
   v := ck.PutExt(key, value, true)
   return v
 }
+
