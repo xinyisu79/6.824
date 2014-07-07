@@ -11,27 +11,78 @@ import "syscall"
 import "encoding/gob"
 import "math/rand"
 import "time"
-//"strconv"
 
 /*
-Design:
-
-1. Each server has its corresponding paxos server
-
 
 Notes:
-1. Always assign Max() + 1 to next instance, so seq number begins from 1, 2, 3 ... so apply start from
-	processed + 1.
+1. Settings:
+	Each server has its corresponding paxos peer, content[] map cache result, processed identify watermark of applied
+	operation.
+
+	server get request r(op):
+	1) From [processed+1, Max], must process all these requests before applying current one, because undecided instance
+	in the range r could occur(unreliable, r processed not respond)
+	2) hole instance h(unknown result for this server s1) in [processed + 1, Max]
+		2.1) If h is decided in view of s1, just learn it and apply it
+		2.2) If h is undecided in view of s1,
+			a)it's decided by majority(but unknown to s1 due to loss when sending decision), put up op, paxos ensures it's
+			still old decided request, not this op
+			b)it's not decided by majority, just put up op at this hole does not matter: if client r0 <: r1, seq(r0) must
+			  be before this hole. because this processing mechanism ensures no holes up to seq(r_current). =>
+			  seq(r0) <: seq(hole) <:=  seq(r1) (if put up at hole, seq(hole) = seq(r1)
+
+
+	However, the most complex issue is 2. At most once semantics...
+
+
 
 2. Complex Issue: At most once
-	one client issue a request to s1, s1 got block(mutex), and unreliable, disregard response.
-	client then request to s2, s2 finish quickly and respond. Then client move on, make requests r2, r3 ...
-	so if naively rememeber only one uuid, later on requests would overwrite that value, make s2 forget r1 is already
-	processed...
-	Current Solutions is: client request r1 -> s1 fail, sleep a while, and then issue next request. This ensures former
+	client ck1 issue a request r1 to s1, s1 got block(mutex), waiting for other request and unreliable => disregard
+	response. client then request to s2, s2 finish quickly and respond. Then client move on, make requests r2, r3 ...
+	so if naively rememeber only one uuid, later on requests would overwrite that value, when s1's blocking on r1 get
+	scheduled s1 forget r1 is already processed...
+
+	Possible Solutions:
+	A. Client wait (Currently adopted)
+	client request r1 -> s1 fail, sleep a while, and then issue next request. This ensures former
 	request already processed. Then client leave Put() Get() Method, there is no outstanding request on server side for
 	this request any more.
-	So tricky... 
+	This depends on during client sleep interval, the blocked request on s1 get scheduled
+
+	B. Server rememeber more
+	Instead of just rememeber last one req, remember last-k requests. Then could tolerate overwrite k times, namely k
+	more new ck1's request handled, before this last old request get scheduled.
+	Depends on how many new request issued from client.
+	Single put/get would be faster.
+	Seems dymano adopt smiliar approach
+	Variation may be remember last K miniute requests
+
+
+	This problem would reappear in ManyPartition test case: partition means minority servers could not procceed, and
+	client would more likely issue new request, making it forget that has been processed.
+
+	waiting longer partly solve it...
+
+	So tricky...
+
+	However: in real world, partition could be very long, s1 receive r1, get partioned, system already process r2, r3, r4
+	 .. r100.
+	 if using solution A), then client wait time has to be longer than partitioned time.
+	 if using solution B), then remember last-K should be larger than number of request issued by ck1 during partition
+
+	 parition time has to be a upper bound... otherwise at-most-once is hard to acheive...
+
+I'm so stupid: simple solution from https://github.com/colin2328/6.824/tree/master/src/kvpaxos :(
+C) just making uuid from each clieng starting from 1, and keep increasing for following requests, 2, 3, 4...
+	just compare the uuid value, if arg.UUID <= last seen[uuid], indicates it's already processed...
+
+
+
+3. PL & Modeling
+	It's hard to conceive corner case and debugging is troublesome. Automatic verification normally requires manual efforts
+	for modeling. Better language design => modeling & coding & code gen & verification all embodied by language itself?
+
+
 
 Problem:
 
