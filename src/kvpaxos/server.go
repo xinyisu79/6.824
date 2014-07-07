@@ -11,6 +11,7 @@ import "syscall"
 import "encoding/gob"
 import "math/rand"
 import "time"
+//"strconv"
 
 /*
 Design:
@@ -22,6 +23,19 @@ Notes:
 1. Always assign Max() + 1 to next instance, so seq number begins from 1, 2, 3 ... so apply start from
 	processed + 1.
 
+2. Complex Issue: At most once
+	one client issue a request to s1, s1 got block(mutex), and unreliable, disregard response.
+	client then request to s2, s2 finish quickly and respond. Then client move on, make requests r2, r3 ...
+	so if naively rememeber only one uuid, later on requests would overwrite that value, make s2 forget r1 is already
+	processed...
+	Current Solutions is: client request r1 -> s1 fail, sleep a while, and then issue next request. This ensures former
+	request already processed. Then client leave Put() Get() Method, there is no outstanding request on server side for
+	this request any more.
+	So tricky... 
+
+Problem:
+
+1. TOKNOW: why the succeed, not break the loop of client? leads to multiple request success
 
 **/
 
@@ -62,7 +76,17 @@ type KVPaxos struct {
 
 	// Your definitions here.
   content map[string] string //key-value content
+	seen map[string] int64 // seen outstanding client request, maintaining at-most-once semantics
+	replies map[string] string // map (client_name) => last outstanding reply result
 	processed int // up to this seq number, all has been applied in content dict{}
+}
+
+func PrintOp(op Op) string{
+	if op.Type == GetOp{
+		return fmt.Sprintf("{c:%s get uid:%d key:%s}", op.Client, op.UUID%1000000, op.Key)
+	}else{
+		return fmt.Sprintf("{c:%s put uid:%d key:%s value:%s}", op.Client, op.UUID%1000000, op.Key, op.Value)
+	}
 }
 
 
@@ -80,52 +104,74 @@ func (kv *KVPaxos)WaitAgreement(seq int) Op{
 	}
 }
 
+//Apply all operation entries before seq, not included
+func (kv *KVPaxos) Apply(op Op, seq int) {
+	previous, exists := kv.content[op.Key]
+	if !exists{
+		previous = ""
+	}
+	kv.replies[op.Client] = previous
+	kv.seen[op.Client] = op.UUID
+
+	if op.Type == PutOp{
+		if op.Dohash{
+			kv.content[op.Key] = NextValue(previous, op.Value)
+//			fmt.Println("apply sr", kv.me, "ck", op.Client, "seq ", seq, "uuid", op.UUID%1000000, "key", op.Key,
+//					"before", previous, "after", kv.content[op.Key])
+		} else{
+			kv.content[op.Key] = op.Value
+		}
+	}
+	kv.processed++
+	kv.px.Done(kv.processed)
+}
+
+
+func (kv *KVPaxos)AddOp(op Op) (bool, string) {
+//	fmt.Printf("AddOp srv:%s recv %s\n", kv.me, PrintOp(op))
+	var ok = false
+	for !ok {
+		//check seen
+		uuid, exists := kv.seen[op.Client];
+		if exists && uuid == op.UUID{
+			return false, kv.replies[op.Client]
+		}
+
+		seq := kv.processed + 1
+		decided, t := kv.px.Status(seq)
+		var res Op
+		if decided{
+			res = t.(Op)
+		} else{
+			kv.px.Start(seq, op)
+			res = kv.WaitAgreement(seq)
+//			fmt.Println("sr ", kv.me, " put up ", seq, " seen ", exists, " seenUUID ", uuid, " opuuid", op.UUID)
+		}
+		ok = res.UUID == op.UUID
+		kv.Apply(res, seq)
+	}
+	return true, kv.replies[op.Client]
+}
 
 func (kv *KVPaxos) Get(args *GetArgs, reply *GetReply) error {
 	// Your code here.
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
 	key, uuid, ck := args.Key, args.UUID, args.Me
-	item := Op{Type:GetOp, Key:key, UUID:uuid, Client:ck}
-	var ok = false
-	var seq = 0
-	for !ok {
-		seq = kv.px.Max() + 1
-		kv.px.Start(seq, item)
-		ok = kv.WaitAgreement(seq).UUID == uuid
-	}
-
-	//TODO: PutExt(), treat differently
-	//Apply all operation entries before this operation
-	for i := kv.processed + 1; i < seq; i++{
-		entry := kv.WaitAgreement(i)
-		if entry.Type == PutOp{
-			kv.content[entry.Key] = entry.Value
-		}
-	}
-	kv.processed = seq
-	kv.px.Done(seq)
-
-	value, exits := kv.content[key]
-	if exits{
-		reply.Value = value
-	}
+	_, result := kv.AddOp(Op{Type:GetOp, Key:key, UUID:uuid, Client:ck})
+	reply.Value = result
 	return nil
 }
 
 
-//TODO: seems that PutExt() also needs to apply all previous operations
 func (kv *KVPaxos) Put(args *PutArgs, reply *PutReply) error {
 	// Your code here.
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
 	key, value, dohash, uuid, ck := args.Key, args.Value, args.DoHash, args.UUID, args.Me
-	item := Op{PutOp, key, value, dohash, uuid, ck}
-	var ok = false
-	for !ok {
-		seq := kv.px.Max() + 1
-		kv.px.Start(seq, item)
-		ok = kv.WaitAgreement(seq).UUID == uuid
+	_, result := kv.AddOp(Op{PutOp, key, value, dohash, uuid, ck})
+	if dohash{
+		reply.PreviousValue = result
 	}
 	return nil
 }
@@ -155,6 +201,8 @@ func StartServer(servers []string, me int) *KVPaxos {
 
 	// Your initialization code here.
 	kv.content = map[string]string{}
+	kv.seen = map[string]int64{}
+	kv.replies = map[string]string{}
 	kv.processed = 0
 
 	rpcs := rpc.NewServer()

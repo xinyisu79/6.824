@@ -3,6 +3,7 @@ package kvpaxos
 import "hash/fnv"
 import "crypto/rand"
 import "math/big"
+import "strconv"
 
 const (
   OK = "OK"
@@ -50,4 +51,10 @@ func nrand() int64 {
 	bigx, _ := rand.Int(rand.Reader, max)
 	x := bigx.Int64()
 	return x
+}
+
+
+func NextValue(hprev string, val string) string {
+	h := hash(hprev + val)
+	return strconv.Itoa(int(h))
 }
