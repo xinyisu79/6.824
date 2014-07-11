@@ -7,6 +7,7 @@ import "os"
 // import "time"
 import "fmt"
 import "math/rand"
+import "runtime/debug"
 
 func port(tag string, host int) string {
   s := "/var/tmp/824-"
@@ -50,6 +51,7 @@ func check(t *testing.T, groups []int64, ck *Clerk) {
     for s, g := range c.Shards {
       _, ok := c.Groups[g]
       if ok == false {
+				debug.PrintStack()
         t.Fatalf("shard %v -> invalid group %v", s, g)
       }
     }

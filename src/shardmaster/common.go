@@ -1,5 +1,11 @@
 package shardmaster
 
+
+import (
+	"crypto/rand"
+	"math/big"
+)
+
 //
 // Master shard server: assigns shards to replication groups.
 //
@@ -58,3 +64,11 @@ type QueryArgs struct {
 type QueryReply struct {
   Config Config
 }
+
+func nrand() int64 {
+	max := big.NewInt(int64(int64(1) << 62))
+	bigx, _ := rand.Int(rand.Reader, max)
+	x := bigx.Int64()
+	return x
+}
+
