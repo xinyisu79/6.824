@@ -73,6 +73,7 @@ func check(t *testing.T, groups []int64, ck *Clerk) {
     }
   }
   if max > min + 1 {
+		debug.PrintStack()
     t.Fatalf("max %v too much larger than min %v", max, min)
   }
 }

@@ -11,6 +11,7 @@ import "syscall"
 import "encoding/gob"
 import "math/rand"
 import "time"
+import "runtime/debug"
 
 /**
 
@@ -29,10 +30,26 @@ Design:
 	(This does not matter, paxos is library as Lab 3, but using different goroutines to do accept/paxos operations,
 	sperated with shardmaster's request/opeartion handling)
 
+Note:
+
+1. Rebanlancing
+
+The most tricky part is rebalancing. General way would be calculate how many shards each replica group should have, (
+ quota = num_of_shards / num_of_group, more = num_shards - quota * num_group) the top-more groups with most shards are
+ assigned quota + 1, others are quota shards.) Then move from need less to group need more.
+
+ However, when implementing this, found go is not convenient... some expected features not avaliable from build-in func.
+  like a) get map.keys() b) sort according to certain field. has to write C-like troublesome code..
+
+  So, instead, 'cause only possible scenario to cause unbalanced shards allocation is join/leave. just move from/to
+   max/min with this joining/leaving group.
+
+
 
 Problem & Question:
 
 1. just allow config number keep going up?
+seems so
 
 */
 
@@ -72,6 +89,7 @@ type Op struct {
 
 
 
+
 func (kv *ShardMaster)WaitAgreement(seq int) Op{
 	to := 10 * time.Millisecond
 	for {
@@ -86,44 +104,73 @@ func (kv *ShardMaster)WaitAgreement(seq int) Op{
 	}
 }
 
-//rebalancing the workload of shards among different groups
-func (sm *ShardMaster) Rebalance(){
-	config := &sm.configs[sm.cfgnum]
-	num := len(config.Groups)
-	quota := NShards / num
-	counts := map[int64]int{}
-	gids := make([]int64, 0)
-
-	for gid := range config.Groups{
-		counts[gid] = 0
-		gids = append(gids, gid)
-	}
-	for _, gid := range config.Shards{
-		counts[gid]++
-	}
-
-	//brute force... since NShards is just 10
-	for {
-		ok := true
-		for _, gid := range gids{
-			if counts[gid] < quota{
-				ok = false
-				for shard, from := range config.Shards{
-					_, exists := config.Groups[from]
-					if counts[from] > quota || !exists{
-						config.Shards[shard] = gid
-						counts[gid]++
-						if exists{
-							counts[from]--
-						}
-						break
-					}
-				}
-				break
+func (sm *ShardMaster) CheckValid(c Config) {
+	if len(c.Groups) > 0 {
+		for _, g := range c.Shards {
+			_, ok := c.Groups[g]
+			if ok == false {
+				fmt.Println("Not valid result, unallocated shards",c.Num)
+				fmt.Println("len(groups): ", len(c.Groups))
+				debug.PrintStack()
+				os.Exit(-1)
 			}
 		}
-		if ok{
-			return
+	}
+}
+
+func GetGidCounts(c *Config) (int64, int64){
+	min_id, min_num, max_id, max_num := int64(0),999,int64(0),-1
+	counts := map[int64]int{}
+	for g := range c.Groups{
+		counts[g] = 0
+	}
+	for _, g := range c.Shards{
+		counts[g]++
+	}
+	for g := range counts{
+		_, exists := c.Groups[g]
+		if exists && min_num > counts[g]{
+			min_id, min_num = g, counts[g]
+		}
+		if exists && max_num < counts[g]{
+			max_id, max_num = g, counts[g]
+		}
+	}
+	for _, g := range c.Shards{
+		if g == 0{
+			max_id = 0
+		}
+	}
+	return min_id, max_id
+}
+
+func GetShardByGid(gid int64, c *Config) int{
+	for s, g := range c.Shards{
+		if g == gid{
+			return s
+		}
+	}
+	return -1
+}
+
+
+//rebalancing the workload of shards among different groups
+func (sm *ShardMaster) Rebalance(group int64, isLeave bool){
+	c := &sm.configs[sm.cfgnum]
+	for i := 0; ; i++{
+		min_id, max_id := GetGidCounts(c)
+		if isLeave{
+			s := GetShardByGid(group, c)
+			if s == -1{
+				break
+			}
+			c.Shards[s] = min_id
+		} else{
+			if i == NShards / len(c.Groups){
+				break
+			}
+			s := GetShardByGid(max_id, c)
+			c.Shards[s] = group
 		}
 	}
 }
@@ -134,10 +181,13 @@ func (sm *ShardMaster) NextConfig() *Config{
 	var new Config
 	new.Num = old.Num + 1
 	new.Groups = map[int64][]string{}
+	new.Shards = [NShards]int64{}
 	for gid, servers := range old.Groups {
 		new.Groups[gid] = servers
 	}
-	new.Shards = old.Shards
+	for i, v := range old.Shards{
+		new.Shards[i] = v
+	}
 	sm.cfgnum++
 	sm.configs = append(sm.configs, new)
 	return &sm.configs[sm.cfgnum]
@@ -145,14 +195,20 @@ func (sm *ShardMaster) NextConfig() *Config{
 
 func (sm *ShardMaster) ApplyJoin(gid int64, servers []string){
 	config := sm.NextConfig()
-	config.Groups[gid] = servers
-	sm.Rebalance()
+	_, exists := config.Groups[gid]
+	if !exists{
+		config.Groups[gid] = servers
+		sm.Rebalance(gid, false)
+	}
 }
 
 func (sm *ShardMaster) ApplyLeave(gid int64){
 	config := sm.NextConfig()
-	delete(config.Groups, gid)
-	sm.Rebalance()
+	_, exists := config.Groups[gid]
+	if exists{
+		delete(config.Groups, gid)
+		sm.Rebalance(gid, true)
+	}
 }
 
 func (sm *ShardMaster) ApplyMove(gid int64, shard int){
@@ -161,8 +217,8 @@ func (sm *ShardMaster) ApplyMove(gid int64, shard int){
 }
 
 func (sm *ShardMaster) ApplyQuery(num int) Config{
-//	fmt.Printf("query num: %d len %d", num, len(sm.configs))
 	if num == -1{
+		sm.CheckValid(sm.configs[sm.cfgnum])
 		return sm.configs[sm.cfgnum]
 	} else{
 		return sm.configs[num]
@@ -225,6 +281,7 @@ func (sm *ShardMaster) Join(args *JoinArgs, reply *JoinReply) error {
 	defer sm.mu.Unlock()
 	op := Op{Type:JoinOp, GID:args.GID, Servers:args.Servers}
 	sm.AddOp(op)
+	sm.CheckValid(sm.configs[sm.cfgnum])
 	return nil
 }
 
@@ -234,6 +291,7 @@ func (sm *ShardMaster) Leave(args *LeaveArgs, reply *LeaveReply) error {
 	defer sm.mu.Unlock()
 	op := Op{Type:LeaveOp, GID:args.GID}
 	sm.AddOp(op)
+	sm.CheckValid(sm.configs[sm.cfgnum])
 	return nil
 }
 
@@ -243,6 +301,7 @@ func (sm *ShardMaster) Move(args *MoveArgs, reply *MoveReply) error {
 	defer sm.mu.Unlock()
 	op := Op{Type:MoveOp, GID:args.GID, Shard:args.Shard}
 	sm.AddOp(op)
+	sm.CheckValid(sm.configs[sm.cfgnum])
 	return nil
 }
 
@@ -252,6 +311,7 @@ func (sm *ShardMaster) Query(args *QueryArgs, reply *QueryReply) error {
 	defer sm.mu.Unlock()
 	op := Op{Type:QueryOp, Num:args.Num}
 	reply.Config = sm.AddOp(op)
+	//	sm.CheckValid(sm.configs[sm.cfgnum])
 	return nil
 }
 
@@ -267,7 +327,7 @@ func (sm *ShardMaster) Kill() {
 // servers that will cooperate via Paxos to
 // form the fault-tolerant shardmaster service.
 // me is the index of the current server in servers[].
-// 
+//
 func StartServer(servers []string, me int) *ShardMaster {
 	gob.Register(Op{})
 
