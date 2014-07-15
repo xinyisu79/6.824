@@ -2,6 +2,7 @@ package shardkv
 import "hash/fnv"
 import "math/big"
 import "crypto/rand"
+import "strconv"
 //
 // Sharded key/value server.
 // Lots of replica groups, each running op-at-a-time paxos.
@@ -25,7 +26,8 @@ type PutArgs struct {
   // You'll have to add definitions here.
   // Field names must start with capital letters,
   // otherwise RPC will break.
-
+	UUID int64
+	Me string // identify clerk, for at-most-once semantics
 }
 
 type PutReply struct {
@@ -36,6 +38,8 @@ type PutReply struct {
 type GetArgs struct {
   Key string
   // You'll have to add definitions here.
+	UUID int64
+	Me string
 }
 
 type GetReply struct {
@@ -57,3 +61,7 @@ func nrand() int64 {
 	return x
 }
 
+func NextValue(hprev string, val string) string {
+	h := hash(hprev + val)
+	return strconv.Itoa(int(h))
+}

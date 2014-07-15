@@ -43,13 +43,25 @@ Notes & Design (some from project description)
 
 5. after moving to new view, just leave shards not owing in new view there, undeleted, to simply implementation.
 
+6. Migrating Shard
+	Tick() periodically check whether the shard belongs itself, send shards to other group. But before sending content
+	and user seen[] map, should apply all operations before(include) paxos.Max(). This is similar in Get()/Put()
+	handler, has to try to append operation, instead of modify content[]map directly. Because due to unreliable
+	network, it's possible for one peers fail to get paxos instance decision.
+	On receiver side, could have map[gid] => processed_forward_config_num, to only process migration once,
+	but seems multiple times does not matter. :)
+
 
 Hint: Think about when it is ok for a server to give shards to the other server during view change.
 
 
 */
 
-const Debug=0
+const (
+	Debug=0
+	GetOp = 1
+	PutOp = 2
+)
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug > 0 {
@@ -61,6 +73,12 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 
 type Op struct {
 	// Your definitions here.
+	Type int
+	Key string
+	Value string
+	Dohash bool
+	UUID int64
+	Client string
 }
 
 
@@ -76,16 +94,94 @@ type ShardKV struct {
 	gid int64 // my replica group ID
 
 	// Your definitions here.
+	content map[string] string //key-value content
+	seen map[string] int64 // seen outstanding client request, maintaining at-most-once semantics
+	replies map[string] string // map (client_name) => last outstanding reply result
+	processed int // up to this seq number, all has been applied in content dict{}
 }
+
+
+func (kv *ShardKV)WaitAgreement(seq int) Op{
+	to := 10 * time.Millisecond
+	for {
+		decided, val := kv.px.Status(seq)
+		if decided{
+			return val.(Op)
+		}
+		time.Sleep(to)
+		if to < 10 * time.Second{
+			to *= 2
+		}
+	}
+}
+
+
+//Apply all operation entries before seq, not included
+func (kv *ShardKV) Apply(op Op, seq int) {
+	previous, exists := kv.content[op.Key]
+	if !exists{
+		previous = ""
+	}
+	kv.replies[op.Client] = previous
+	kv.seen[op.Client] = op.UUID
+
+	if op.Type == PutOp{
+		if op.Dohash{
+			kv.content[op.Key] = NextValue(previous, op.Value)
+			//			fmt.Println("apply sr", kv.me, "ck", op.Client, "seq ", seq, "uuid", op.UUID%1000000, "key", op.Key,
+			//					"before", previous, "after", kv.content[op.Key])
+		} else{
+			kv.content[op.Key] = op.Value
+		}
+	}
+	kv.processed++
+	kv.px.Done(kv.processed)
+}
+
+func (kv *ShardKV)AddOp(op Op) string {
+	var ok = false
+	for !ok {
+		//check seen
+		uuid, exists := kv.seen[op.Client];
+		if exists && uuid == op.UUID{
+			return kv.replies[op.Client]
+		}
+
+		seq := kv.processed + 1
+		decided, t := kv.px.Status(seq)
+		var res Op
+		if decided{
+			res = t.(Op)
+		} else{
+			kv.px.Start(seq, op)
+			res = kv.WaitAgreement(seq)
+		}
+		ok = res.UUID == op.UUID
+		kv.Apply(res, seq)
+	}
+	return kv.replies[op.Client]
+}
+
+
 
 
 func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) error {
 	// Your code here.
+	reply.Err = OK
+	key, uuid, ck := args.Key, args.UUID, args.Me
+	result := kv.AddOp(Op{Type:GetOp, Key:key, UUID:uuid, Client:ck})
+	reply.Value = result
 	return nil
 }
 
 func (kv *ShardKV) Put(args *PutArgs, reply *PutReply) error {
 	// Your code here.
+	reply.Err = OK
+	key, value, dohash, uuid, ck := args.Key, args.Value, args.DoHash, args.UUID, args.Me
+	result := kv.AddOp(Op{PutOp, key, value, dohash, uuid, ck})
+	if dohash{
+		reply.PreviousValue = result
+	}
 	return nil
 }
 
@@ -124,6 +220,11 @@ func StartServer(gid int64, shardmasters []string,
 
 	// Your initialization code here.
 	// Don't call Join().
+	kv.content = map[string]string{}
+	kv.seen = map[string]int64{}
+	kv.replies = map[string]string{}
+	kv.processed = 0
+
 
 	rpcs := rpc.NewServer()
 	rpcs.Register(kv)

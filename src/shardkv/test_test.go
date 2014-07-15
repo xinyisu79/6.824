@@ -21,11 +21,6 @@ func port(tag string, host int) string {
   return s
 }
 
-func NextValue(hprev string, val string) string {
-  h := hash(hprev + val)
-  return strconv.Itoa(int(h))
-}
-
 func mcleanup(sma []*shardmaster.ShardMaster) {
   for i := 0; i < len(sma); i++ {
     if sma[i] != nil {
@@ -95,7 +90,7 @@ func TestBasic(t *testing.T) {
   if v != "x" {
     t.Fatalf("Puthash got wrong value")
   }
-  ov := NextValue("x", "b")
+	ov := NextValue("x", "b")
   if ck.Get("a") != ov {
     t.Fatalf("Get got wrong value")
   }

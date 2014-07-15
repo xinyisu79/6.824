@@ -5,12 +5,16 @@ import "net/rpc"
 import "time"
 import "sync"
 import "fmt"
+import "strconv"
 
 type Clerk struct {
   mu sync.Mutex // one RPC at a time
   sm *shardmaster.Clerk
   config shardmaster.Config
+
   // You'll have to modify Clerk.
+	seq_num int64 // keep track of record seq number
+	me string
 }
 
 
@@ -19,7 +23,9 @@ func MakeClerk(shardmasters []string) *Clerk {
   ck := new(Clerk)
   ck.sm = shardmaster.MakeClerk(shardmasters)
   // You'll have to modify MakeClerk.
-  return ck
+  ck.seq_num = 0
+	ck.me = strconv.FormatInt(nrand(), 10)
+	return ck
 }
 
 //
@@ -79,6 +85,7 @@ func (ck *Clerk) Get(key string) string {
   defer ck.mu.Unlock()
 
   // You'll have to modify Get().
+	ck.seq_num++
 
   for {
     shard := key2shard(key)
@@ -90,8 +97,7 @@ func (ck *Clerk) Get(key string) string {
     if ok {
       // try each server in the shard's replication group.
       for _, srv := range servers {
-        args := &GetArgs{}
-        args.Key = key
+        args := &GetArgs{Key:key, UUID:ck.seq_num, Me:ck.me}
         var reply GetReply
         ok := call(srv, "ShardKV.Get", args, &reply)
         if ok && (reply.Err == OK || reply.Err == ErrNoKey) {
@@ -116,6 +122,7 @@ func (ck *Clerk) PutExt(key string, value string, dohash bool) string {
   defer ck.mu.Unlock()
 
   // You'll have to modify Put().
+	ck.seq_num++
 
   for {
     shard := key2shard(key)
@@ -127,10 +134,8 @@ func (ck *Clerk) PutExt(key string, value string, dohash bool) string {
     if ok {
       // try each server in the shard's replication group.
       for _, srv := range servers {
-        args := &PutArgs{}
-        args.Key = key
-        args.Value = value
-        args.DoHash = dohash
+        args := &PutArgs{Key:key, Value:value,
+					DoHash:dohash, Me:ck.me, UUID:ck.seq_num}
         var reply PutReply
         ok := call(srv, "ShardKV.Put", args, &reply)
         if ok && reply.Err == OK {
