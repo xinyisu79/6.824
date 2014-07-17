@@ -26,7 +26,7 @@ type PutArgs struct {
   // You'll have to add definitions here.
   // Field names must start with capital letters,
   // otherwise RPC will break.
-	UUID int64
+	SeqNum int64
 	Me string // identify clerk, for at-most-once semantics
 }
 
@@ -38,13 +38,23 @@ type PutReply struct {
 type GetArgs struct {
   Key string
   // You'll have to add definitions here.
-	UUID int64
+	SeqNum int64
 	Me string
 }
 
 type GetReply struct {
   Err Err
   Value string
+}
+
+type GetShardArgs struct {
+	Shard int
+}
+
+type GetShardReply struct {
+	Content map[string]string
+	Seen map[string]int64
+	Replies map[string]string
 }
 
 

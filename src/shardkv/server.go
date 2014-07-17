@@ -43,24 +43,60 @@ Notes & Design (some from project description)
 
 5. after moving to new view, just leave shards not owing in new view there, undeleted, to simply implementation.
 
+
+
 6. Migrating Shard
-	Tick() periodically check whether the shard belongs itself, send shards to other group. But before sending content
-	and user seen[] map, should apply all operations before(include) paxos.Max(). This is similar in Get()/Put()
-	handler, has to try to append operation, instead of modify content[]map directly. Because due to unreliable
-	network, it's possible for one peers fail to get paxos instance decision.
-	On receiver side, could have map[gid] => processed_forward_config_num, to only process migration once,
-	but seems multiple times does not matter. :)
+
+	terms: forward shard S from G1 to G2, client is ck, this called migration . tick() periodically check new config
+	from shardmaster.
+
+	a) actions before migrate
+	have to wait seq_num <= paxos.Max() to be applied before sending, ensuring sending shard content[] is updated.
+	(seq_num < Max() could have operation on S) it's like when applying Get/Put, instead of modifying content[] directly,
+	 append paxos log, and then apply. (reason: due to partition, this server may not see paxos decision on previous
+	 operations)
+
+	b) when to migrate/reconfiguration
+	one thing is important: reconfiguration is just operation proposal from shardmaster,
+	whether it's come into effect is just a local replica group's decision. Even the config client see may be more
+	recent than replica group has, doesn't matter.
+	 But the replica group should reach consensus on relative order between put/get op and when to
+	 reconfiguration/migration. As if sr1 use config2, return ck1's put(a) ErrGroup, sr2 use config1,
+	 apply ck1's put(a) into effect. Than it's inconsistent.
+
+	c) push or pull
+	during reconfiguratoin cfg1 => cfg2, shard from G1 => G2, whose responsobility? G1 push or G2 pull when decide to
+	apply reconfiguration? should be G2's pull: because right after reconfig op in G2,
+	would have following put/get op required this migrated shard, if Push by G1, no gaurantee about when shard would
+	arrive.
 
 
-Hint: Think about when it is ok for a server to give shards to the other server during view change.
+	d) accept all client[] status? (seen[], oldreplies[] map)
+	no. if current G2.seen[ck] > migration.seen[ck], not update, otherwise update and modify seen[] correspondingly.
+	This may cause modify seen[ck] that ck does not send to G2, (only request on Shard S should to G2 later) but does
+	not matter to keep it as each client has only one outstanding request
 
+	summary:
+	shardmaster accept join/leave/move request, and make corresponding change, shardmaster is a group of servers using
+	paxos to make it more fault tolerant. client and k/v servers learn the configration change by query(); however,
+	it's not required for kv servers to finish shards migration before clients issue request based on new config. We
+	could leave clients silly loop again and every replica turns down its request because none of them use as new
+	config as client does... does not matter, client would keep looping and finally would succeed.
 
+	Instead what's required is consens in a replica about when to do migration for reconfiguration,
+	the reconfig's relative order to put/get should be same to all replica, it's a paxos problem. That's why put
+	reconfig also as op in paxos log.
+
+	TODO: G2 <=  G1 for S1, forward G1's configuration also
+	TODO: G3 <= G2 <= G1, is it necessary? maybe...
 */
 
 const (
 	Debug=0
 	GetOp = 1
 	PutOp = 2
+	ReconfigOp = 3
+	GetShardOp = 4
 )
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
@@ -77,8 +113,11 @@ type Op struct {
 	Key string
 	Value string
 	Dohash bool
-	UUID int64
+	SeqNum int64 // sequence number from certain client
+	UUID int64 //unique identify the Op instance
 	Client string
+	Config shardmaster.Config //proposed new configration for ReconfigOp
+	Reconfig GetShardReply //when ReconfigOp, what should be applied
 }
 
 
@@ -97,7 +136,25 @@ type ShardKV struct {
 	content map[string] string //key-value content
 	seen map[string] int64 // seen outstanding client request, maintaining at-most-once semantics
 	replies map[string] string // map (client_name) => last outstanding reply result
+
 	processed int // up to this seq number, all has been applied in content dict{}
+	config shardmaster.Config
+}
+
+
+
+func PrintOp(op Op) string{
+	switch op.Type{
+	case PutOp:
+		return fmt.Sprintf("put key:%s value:%s dohash:%t uuid:%d", op.Key, op.Value, op.Dohash, op.UUID)
+	case GetOp:
+		return fmt.Sprintf("get key:%s uuid:%d", op.Key, op.UUID)
+	case GetShardOp:
+		return fmt.Sprintf("gshard uuid:%d", op.UUID)
+	case ReconfigOp:
+		return fmt.Sprintf("recfg uuid:%d", op.UUID)
+	}
+	return ""
 }
 
 
@@ -116,37 +173,94 @@ func (kv *ShardKV)WaitAgreement(seq int) Op{
 }
 
 
-//Apply all operation entries before seq, not included
-func (kv *ShardKV) Apply(op Op, seq int) {
-	previous, exists := kv.content[op.Key]
-	if !exists{
-		previous = ""
-	}
+func (kv *ShardKV) ApplyGet(op Op){
+	previous, _ := kv.content[op.Key]
 	kv.replies[op.Client] = previous
-	kv.seen[op.Client] = op.UUID
+	kv.seen[op.Client] = op.SeqNum
+}
 
-	if op.Type == PutOp{
-		if op.Dohash{
-			kv.content[op.Key] = NextValue(previous, op.Value)
-			//			fmt.Println("apply sr", kv.me, "ck", op.Client, "seq ", seq, "uuid", op.UUID%1000000, "key", op.Key,
-			//					"before", previous, "after", kv.content[op.Key])
-		} else{
-			kv.content[op.Key] = op.Value
+func (kv *ShardKV) ApplyPut(op Op){
+	previous, _ := kv.content[op.Key]
+	kv.replies[op.Client] = previous
+	kv.seen[op.Client] = op.SeqNum
+
+	if op.Dohash{
+		kv.content[op.Key] = NextValue(previous, op.Value)
+	} else{
+		kv.content[op.Key] = op.Value
+	}
+}
+
+
+func (kv *ShardKV) ApplyReconfigure(op Op){
+	kv.config = op.Config
+
+	info := &op.Reconfig
+	for key := range info.Content{
+		kv.content[key] = info.Content[key]
+	}
+	for client := range info.Seen{
+		seqnum, exists := kv.seen[client]
+		if !exists || seqnum < info.Seen[client]{
+			kv.seen[client] = info.Seen[client]
+			kv.replies[client] = info.Replies[client]
 		}
+	}
+}
+
+//Apply all operation entries before seq, not included
+func (kv *ShardKV) Apply(op Op) {
+
+	switch op.Type{
+	case GetOp:
+		kv.ApplyGet(op)
+	case PutOp:
+		kv.ApplyPut(op)
+	case ReconfigOp:
+		kv.ApplyReconfigure(op)
+	case GetShardOp:
+		//do nothing is fine
 	}
 	kv.processed++
 	kv.px.Done(kv.processed)
 }
 
-func (kv *ShardKV)AddOp(op Op) string {
-	var ok = false
-	for !ok {
-		//check seen
-		uuid, exists := kv.seen[op.Client];
-		if exists && uuid == op.UUID{
-			return kv.replies[op.Client]
+func (kv *ShardKV) CheckOp(op Op) (Err, string){
+
+	switch op.Type{
+	case ReconfigOp:
+		//check current config
+		if kv.config.Num >= op.Config.Num{
+			//			fmt.Println("happends")
+			return OK, ""
+		}
+	case PutOp, GetOp:
+		//check shard responsibility
+		shard := key2shard(op.Key)
+		if kv.gid != kv.config.Shards[shard]{
+			return ErrWrongGroup, ""
 		}
 
+		//check seen
+		seqnum, exists := kv.seen[op.Client]
+		if exists && op.SeqNum <= seqnum{
+			return OK, kv.replies[op.Client]
+		}
+	}
+	return "", ""
+}
+
+func (kv *ShardKV)AddOp(op Op) (Err,string) {
+	var ok = false
+	op.UUID = nrand()
+	//	if op.Type == PutOp || op.Type == GetOp{
+	//		fmt.Printf("AddOp: %s\n", PrintOp(op))
+	//	}
+	for !ok {
+		result, ret := kv.CheckOp(op)
+		if result != ""{
+			return result, ret
+		}
 		seq := kv.processed + 1
 		decided, t := kv.px.Status(seq)
 		var res Op
@@ -157,32 +271,96 @@ func (kv *ShardKV)AddOp(op Op) string {
 			res = kv.WaitAgreement(seq)
 		}
 		ok = res.UUID == op.UUID
-		kv.Apply(res, seq)
+		kv.Apply(res)
 	}
-	return kv.replies[op.Client]
+	return OK, kv.replies[op.Client]
 }
-
 
 
 
 func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) error {
 	// Your code here.
-	reply.Err = OK
-	key, uuid, ck := args.Key, args.UUID, args.Me
-	result := kv.AddOp(Op{Type:GetOp, Key:key, UUID:uuid, Client:ck})
-	reply.Value = result
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	key, seqnum, ck := args.Key, args.SeqNum, args.Me
+	reply.Err, reply.Value = kv.AddOp(Op{Type:GetOp, Key:key, SeqNum:seqnum, Client:ck})
 	return nil
 }
 
 func (kv *ShardKV) Put(args *PutArgs, reply *PutReply) error {
 	// Your code here.
-	reply.Err = OK
-	key, value, dohash, uuid, ck := args.Key, args.Value, args.DoHash, args.UUID, args.Me
-	result := kv.AddOp(Op{PutOp, key, value, dohash, uuid, ck})
-	if dohash{
-		reply.PreviousValue = result
-	}
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	op := Op{Type:PutOp, Key:args.Key, Value:args.Value,
+		Dohash:args.DoHash, SeqNum:args.SeqNum, Client:args.Me}
+	reply.Err, reply.PreviousValue = kv.AddOp(op)
 	return nil
+}
+
+// G2 <= G1, shard S1, G2 call G1's GetShard()
+func (kv *ShardKV) GetShard(args *GetShardArgs, reply *GetShardReply) error{
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	shard := args.Shard
+	kv.AddOp(Op{Type:GetShardOp})
+
+	reply.Content = map[string]string{}
+	reply.Seen = map[string]int64{}
+	reply.Replies = map[string]string{}
+
+	for key := range kv.content{
+		if key2shard(key) == shard{
+			reply.Content[key] = kv.content[key]
+		}
+	}
+
+	for client := range kv.seen {
+		reply.Seen[client] = kv.seen[client]
+		reply.Replies[client] = kv.replies[client]
+	}
+
+	return nil
+}
+
+
+func (reply *GetShardReply)Merge(other GetShardReply){
+	for key := range other.Content{
+		reply.Content[key] = other.Content[key]
+	}
+	for client := range other.Seen{
+		uuid, exists := reply.Seen[client]
+		if !exists || uuid < other.Seen[client]{
+			reply.Seen[client] = other.Seen[client]
+			reply.Replies[client] = other.Replies[client]
+		}
+	}
+}
+
+
+func (kv *ShardKV) Reconfigure(newcfg shardmaster.Config) {
+	//get shards
+
+	reconfig := GetShardReply{map[string]string{}, map[string]int64{},
+		map[string]string{}}
+
+	oldcfg := &kv.config
+	for i := 0; i < shardmaster.NShards; i++{
+		gid := oldcfg.Shards[i]
+		if newcfg.Shards[i] == kv.gid && gid != kv.gid{
+			args := &GetShardArgs{i}
+			var reply GetShardReply
+			for _, srv := range oldcfg.Groups[gid]{
+				ok := call(srv, "ShardKV.GetShard", args, &reply)
+				if ok{
+					break
+				}
+			}
+			//process the replys, merge into one results
+			reconfig.Merge(reply)
+		}
+	}
+	op := Op{Type:ReconfigOp, Config:newcfg, Reconfig:reconfig}
+	kv.AddOp(op)
 }
 
 //
@@ -190,6 +368,13 @@ func (kv *ShardKV) Put(args *PutArgs, reply *PutReply) error {
 // if so, re-configure.
 //
 func (kv *ShardKV) tick() {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	newcfg := kv.sm.Query(-1)
+	for i := kv.config.Num + 1; i <= newcfg.Num; i++{
+		cfg := kv.sm.Query(i)
+		kv.Reconfigure(cfg)
+	}
 }
 
 
@@ -217,6 +402,7 @@ func StartServer(gid int64, shardmasters []string,
 	kv.me = me
 	kv.gid = gid
 	kv.sm = shardmaster.MakeClerk(shardmasters)
+	kv.config = shardmaster.Config{Num:-1}
 
 	// Your initialization code here.
 	// Don't call Join().

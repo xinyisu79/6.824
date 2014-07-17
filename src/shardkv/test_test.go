@@ -88,6 +88,7 @@ func TestBasic(t *testing.T) {
   ck.Put("a", "x")
   v := ck.PutHash("a", "b")
   if v != "x" {
+		fmt.Println("v: ", v)
     t.Fatalf("Puthash got wrong value")
   }
 	ov := NextValue("x", "b")
@@ -98,8 +99,8 @@ func TestBasic(t *testing.T) {
   keys := make([]string, 10)
   vals := make([]string, len(keys))
   for i := 0; i < len(keys); i++ {
-    keys[i] = strconv.Itoa(rand.Int())
-    vals[i] = strconv.Itoa(rand.Int())
+    keys[i] = strconv.Itoa(i+1)
+    vals[i] = strconv.Itoa(i+1)
     ck.Put(keys[i], vals[i])
   }
 
