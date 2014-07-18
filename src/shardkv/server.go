@@ -87,8 +87,22 @@ Notes & Design (some from project description)
 	the reconfig's relative order to put/get should be same to all replica, it's a paxos problem. That's why put
 	reconfig also as op in paxos log.
 
-	TODO: G2 <=  G1 for S1, forward G1's configuration also
-	TODO: G3 <= G2 <= G1, is it necessary? maybe...
+	e) prevent deadlock
+	from test_test.go, it's possible, G1 in config7, G2 in config2, G2 cfg2 => cfg3 needs shard from G2,
+	G1 from cfg7 => cfg8 needs shard from G1, so:
+	G1, G2 both entering tick() holding lock, fail to serve other side's GetShard() request.(which also require lock)
+	 Solution: when G1 request shard G2, in G2's GetShard() before acquire lock, check G2's current configuration
+	 number, whether it's newer than G1's assumed. If not, just indicate not able, and G1's attempt to reconfigure
+	 fail, return tick(), releasing lock().
+
+	 This could produce a seriable reconfiguration order, which would not have deadlock problem. (remember: cfgn => cfg
+	  n+1, if G1 <= (Shard S) G2, G2 would never require Shard from G1 (load-balancing mechanism of shardmaster
+	  guarantee this).
+
+
+	  Interesting but difficult project...
+	  Distributed System is so tricky.... =_=
+
 */
 
 const (
@@ -193,8 +207,6 @@ func (kv *ShardKV) ApplyPut(op Op){
 
 
 func (kv *ShardKV) ApplyReconfigure(op Op){
-	kv.config = op.Config
-
 	info := &op.Reconfig
 	for key := range info.Content{
 		kv.content[key] = info.Content[key]
@@ -206,6 +218,7 @@ func (kv *ShardKV) ApplyReconfigure(op Op){
 			kv.replies[client] = info.Replies[client]
 		}
 	}
+	kv.config = op.Config
 }
 
 //Apply all operation entries before seq, not included
@@ -231,7 +244,6 @@ func (kv *ShardKV) CheckOp(op Op) (Err, string){
 	case ReconfigOp:
 		//check current config
 		if kv.config.Num >= op.Config.Num{
-			//			fmt.Println("happends")
 			return OK, ""
 		}
 	case PutOp, GetOp:
@@ -253,9 +265,6 @@ func (kv *ShardKV) CheckOp(op Op) (Err, string){
 func (kv *ShardKV)AddOp(op Op) (Err,string) {
 	var ok = false
 	op.UUID = nrand()
-	//	if op.Type == PutOp || op.Type == GetOp{
-	//		fmt.Printf("AddOp: %s\n", PrintOp(op))
-	//	}
 	for !ok {
 		result, ret := kv.CheckOp(op)
 		if result != ""{
@@ -299,6 +308,10 @@ func (kv *ShardKV) Put(args *PutArgs, reply *PutReply) error {
 
 // G2 <= G1, shard S1, G2 call G1's GetShard()
 func (kv *ShardKV) GetShard(args *GetShardArgs, reply *GetShardReply) error{
+	if kv.config.Num < args.Config.Num{
+		reply.Err = ErrNotReady
+		return nil
+	}
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
 	shard := args.Shard
@@ -336,23 +349,29 @@ func (reply *GetShardReply)Merge(other GetShardReply){
 	}
 }
 
-
-func (kv *ShardKV) Reconfigure(newcfg shardmaster.Config) {
+//return success or failure
+func (kv *ShardKV) Reconfigure(newcfg shardmaster.Config) bool{
 	//get shards
 
-	reconfig := GetShardReply{map[string]string{}, map[string]int64{},
+	reconfig := GetShardReply{OK, map[string]string{}, map[string]int64{},
 		map[string]string{}}
 
 	oldcfg := &kv.config
 	for i := 0; i < shardmaster.NShards; i++{
 		gid := oldcfg.Shards[i]
 		if newcfg.Shards[i] == kv.gid && gid != kv.gid{
-			args := &GetShardArgs{i}
+			args := &GetShardArgs{i, *oldcfg}
 			var reply GetShardReply
 			for _, srv := range oldcfg.Groups[gid]{
+//				uid := nrand() % 10000
+//				fmt.Printf("[%d] G%d(srv%d) <=(S%d) G%d(srv%d) cfg%d\n", uid, kv.gid, kv.me, i, gid, ind, newcfg.Num)
 				ok := call(srv, "ShardKV.GetShard", args, &reply)
-				if ok{
+				if ok && reply.Err == OK{
+//					fmt.Printf("[%d] done\n",uid)
 					break
+				}
+				if ok && reply.Err == ErrNotReady{
+					return false
 				}
 			}
 			//process the replys, merge into one results
@@ -361,6 +380,7 @@ func (kv *ShardKV) Reconfigure(newcfg shardmaster.Config) {
 	}
 	op := Op{Type:ReconfigOp, Config:newcfg, Reconfig:reconfig}
 	kv.AddOp(op)
+	return true
 }
 
 //
@@ -373,7 +393,9 @@ func (kv *ShardKV) tick() {
 	newcfg := kv.sm.Query(-1)
 	for i := kv.config.Num + 1; i <= newcfg.Num; i++{
 		cfg := kv.sm.Query(i)
-		kv.Reconfigure(cfg)
+		if !kv.Reconfigure(cfg) {
+			return
+		}
 	}
 }
 

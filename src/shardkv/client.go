@@ -4,7 +4,6 @@ import "shardmaster"
 import "net/rpc"
 import "time"
 import "sync"
-import "fmt"
 import "strconv"
 
 type Clerk struct {
@@ -57,7 +56,7 @@ func call(srv string, rpcname string,
     return true
   }
 
-  fmt.Println(err)
+//  fmt.Println(err)
   return false
 }
 

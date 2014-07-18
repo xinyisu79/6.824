@@ -2,7 +2,10 @@ package shardkv
 import "hash/fnv"
 import "math/big"
 import "crypto/rand"
-import "strconv"
+import (
+	"strconv"
+	"shardmaster"
+)
 //
 // Sharded key/value server.
 // Lots of replica groups, each running op-at-a-time paxos.
@@ -16,6 +19,7 @@ const (
   OK = "OK"
   ErrNoKey = "ErrNoKey"
   ErrWrongGroup = "ErrWrongGroup"
+	ErrNotReady = "ErrNotReady"
 )
 type Err string
 
@@ -49,9 +53,11 @@ type GetReply struct {
 
 type GetShardArgs struct {
 	Shard int
+	Config shardmaster.Config //provider has to under at least this configuration
 }
 
 type GetShardReply struct {
+	Err Err
 	Content map[string]string
 	Seen map[string]int64
 	Replies map[string]string
